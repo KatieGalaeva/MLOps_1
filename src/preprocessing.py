@@ -1,6 +1,9 @@
-# Import standard libraries
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
+import json
+import seaborn as sns
+from math import atan2, cos, radians, sin, sqrt
 import logging
 
 # Import extra modules
@@ -10,17 +13,6 @@ from sklearn.impute import SimpleImputer
 logger = logging.getLogger(__name__)
 RANDOM_STATE = 42
 
-def add_time_features(df):
-    logger.debug('Adding time features...')
-    df['transaction_time'] = pd.to_datetime(df['transaction_time'])
-    dt = df['transaction_time'].dt
-    df['hour'] = dt.hour
-    df['year'] = dt.year
-    df['month'] = dt.month
-    df['day_of_month'] = dt.day
-    df['day_of_week'] = dt.dayofweek
-    df.drop(columns='transaction_time', inplace=True)
-    return df
 
 
 def cat_encode(train, input_df, col):
@@ -45,8 +37,71 @@ def add_distance_features(df):
         ).km,
         axis=1
     )
-    return df.drop(columns=['lat', 'lon', 'merchant_lat', 'merchant_lon'])
+    return df
 
+def add_time_features(df):
+    df['transaction_time'] = pd.to_datetime(df['transaction_time'])
+    df['year'] = df['transaction_time'].dt.year
+    df['month'] = df['transaction_time'].dt.month
+    df['day'] = df['transaction_time'].dt.day
+    df['hour'] = df['transaction_time'].dt.hour
+    df['minute'] = df['transaction_time'].dt.minute
+    df['day_of_week'] = df['transaction_time'].dt.dayofweek
+    return df.drop(columns=['transaction_time'])
+
+def add_geo_features(df):
+    df['bearing_degree_1'] = df.apply(lambda x: bearing_degree(
+        x['lat'], x['lon'], x['merchant_lat'], x['merchant_lon']), axis=1)
+    df['hav_dist_1'] = df.apply(lambda x: haversine_distance(
+        x['lat'], x['lon'], x['merchant_lat'], x['merchant_lon']), axis=1)
+    return df
+
+
+def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float, n_digits: int = 0) -> float:
+    """
+    Function for calculating distances from points A to B in a straight line
+
+        :param lat1: Latitude of point A
+        :param lon1: Longitude of point A
+        :param lat2: Latitude of point B
+        :param lon2: Longitude of point B
+        :param n_digits: Round the answer to n decimal places
+        :return: Distance straight from the edge to n_digits
+    """
+
+    lat1, lon1, lat2, lon2 = round(lat1, 6), round(lon1, 6), round(lat2, 6), round(lon2, 6)
+    phi1, phi2 = np.radians(lat1), np.radians(lat2)
+    dphi = np.radians(lat2 - lat1)
+
+    dlambda = np.radians(lon2 - lon1)
+    a = np.sin(dphi / 2) ** 2 + np.cos(phi1) * np.cos(phi2) * np.sin(dlambda / 2) ** 2
+
+    return round(2 * 6372800 * np.arctan2(np.sqrt(a), np.sqrt(1 - a)), n_digits)  
+
+
+def bearing_degree(lat1: float, lon1: float, lat2: float, lon2: float, n_digits: int = 0) -> float:
+    """
+    Function for calculating the angle between the line [((lat1, lon1), (lat2, lon2)), (zero meridian)]
+
+        :param lat1: Latitude of point A
+        :param lon1: Longitude of point A
+        :param lat2: Latitude of point B
+        :param lon2: Longitude of point B
+        :param n_digits: Round the answer to n decimal places
+        :return: Angle value with an accuracy of n_digits
+    """
+
+    lat1, lon1 = np.radians(round(lat1, 6)), np.radians(round(lon1, 6))
+    lat2, lon2 = np.radians(round(lat2, 6)), np.radians(round(lon2, 6))
+
+    dlon = (lon2 - lon1)
+    numerator = np.sin(dlon) * np.cos(lat2)
+    denominator = np.cos(lat1) * np.sin(lat2) - (np.sin(lat1) * np.cos(lat2) * np.cos(dlon))
+
+    theta = np.arctan2(numerator, denominator)
+    theta_deg = (np.degrees(theta) + 360) % 360
+
+    return round(theta_deg, n_digits)
 
 # Calculate means for encoding at docker container start
 def load_train_data():
@@ -55,15 +110,16 @@ def load_train_data():
 
     # Define column types
     target_col = 'target'
-    categorical_cols = ['gender', 'merch', 'cat_id', 'one_city', 'us_state', 'jobs']
+    categorical_cols = ['merch', 'cat_id', 'name_1', 'name_2', 'gender', 'street', 'one_city', 'us_state', 'jobs', 'year',	'month', 'day',	'hour',	'minute','day_of_week']
     n_cats = 50
 
     # Import Train dataset
-    train = pd.read_csv('./train_data/train.csv').drop(columns=['name_1', 'name_2', 'street', 'post_code'])
+    train = pd.read_csv('./train_data/train.csv')
     logger.info('Raw train data imported. Shape: %s', train.shape)
 
     # Add some simple time features
     train = add_time_features(train)
+    train = add_geo_features(train)
 
     for col in categorical_cols:
         new_col = col + '_cat'
@@ -81,8 +137,6 @@ def load_train_data():
 
         train = train.merge(temp_df[[col, new_col]], how='left', on=col)
     
-    # Calculate distance between a client and a merchant
-    train = add_distance_features(train)
 
     logger.info('Train data processed. Shape: %s', train.shape)
 
@@ -90,60 +144,19 @@ def load_train_data():
 
 
 # Main preprocessing function
-def run_preproc(train, input_df):
-
-    # Define column types
-    target_col = 'target'
-    categorical_cols = ['gender', 'merch', 'cat_id', 'one_city', 'us_state', 'jobs']
-    continuous_cols = ['amount', 'population_city']
+def run_preproc(train, input_df, model_features, numeric_feat):
+    logger.info('Running preprocessing pipeline...')
     
-    # Run category encoding
-    for col in categorical_cols:
-        input_df = cat_encode(train, input_df, col)
+    df = input_df.copy()
+    df['transaction_time'] = pd.to_datetime(df['transaction_time'])
+    df['ts_transaction_time'] = df['transaction_time'].astype(np.int64) // 10**9  # в секундах
 
-    logger.info('Categorical merging completed. Output shape: %s', input_df.shape)
+    df = add_time_features(df)
+    df = add_geo_features(df)
+
+    df = df[[col for col in model_features if col in df.columns]]
+
+    logger.info('Preprocessing completed. Final shape: %s', df.shape)
     
-    # Add some simple time features
-    input_df = add_time_features(input_df)
+    return df
 
-    logger.info('Added time features. Output shape: %s', input_df.shape)
-
-    categorical_cols = [x + '_cat' for x in categorical_cols]
-    categorical_cols.extend(['hour', 'year', 'month', 'day_of_month', 'day_of_week'])
-    
-    # Run mean ecoding for categorical variables
-    for col in categorical_cols:
-        # Fill empty values of categorical columns with some default category
-        input_df[col] = input_df[col].fillna('cat_NAN')
-    
-        # Create table of means
-        means_tb = train.groupby(col)[[target_col]].mean()\
-                        .reset_index().rename(columns={target_col:f'{col}_mean_enc'})
-        
-        # Join to datasets
-        input_df = input_df.merge(means_tb, how='left', on=col)
-
-    logger.info('Categorical mean encoding completed. Output shape: %s', input_df.shape)
-
-    # Calculate distance between a client and a merchant
-    input_df = add_distance_features(input_df)
-    continuous_cols.extend(['distance'])
-
-    # Impute empty values with mean value
-    imputer = SimpleImputer(missing_values=np.nan, strategy='mean') 
-    imputer = imputer.fit(train[continuous_cols])
-
-    output_df = pd.concat([
-        input_df.drop(columns=continuous_cols),
-        pd.DataFrame(imputer.transform(input_df.copy()[continuous_cols]), columns=continuous_cols)
-    ], axis=1)
-
-    # Add log transformation
-    for col in continuous_cols:
-        output_df[col + '_log'] = np.log(output_df[col] + 1)
-        output_df.drop(columns=col, inplace=True)
-        
-    logger.info('Continuous features preprocessing completed. Output shape: %s', output_df.shape)
-    
-    # Return resulting dataset
-    return output_df
