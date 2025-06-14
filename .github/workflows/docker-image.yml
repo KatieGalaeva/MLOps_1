@@ -17,6 +17,14 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Checkout lfs
+        run: |
+          git lfs install --local
+          AUTH=$(git config --local http.${{ github.server_url }}/.extraheader)
+          git config --local --unset http.${{ github.server_url }}/.extraheader
+          git config --local http.${{ github.server_url }}/${{ github.repository }}.git/info/lfs/objects/batch.extraheader "$AUTH"
+          git lfs pull
+
       - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
