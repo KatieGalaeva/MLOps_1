@@ -1,5 +1,10 @@
 # ML Fraud Detection Service
 
+0. Запустить image
+
+```bash
+docker run -v ./input:/app/input -v ./output:/app/output katiegal/mts25_mlops_hw1_fraud_detector
+```
 
 Сервис для автоматического обнаружения мошеннических транзакций в режиме батчевого скоринга. Обрабатывает CSV-файлы из указанной директории с использованием предобученной CatBoost модели. 
 
